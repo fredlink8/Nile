@@ -1,0 +1,3 @@
+All files are saved as .py you can save them as .txt and follow the code accordingly.
+Other files are JavaScript, you can run in google earthe engine or convert them to python and use in other code editors.
+https://github.com/fredlink8/Nile.git

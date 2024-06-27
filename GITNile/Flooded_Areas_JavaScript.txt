@@ -1,0 +1,131 @@
+#javascript Flooded Areas with change detection using NDVI
+var beforeStart = '2003-07-01';
+var beforeEnd = '2003-07-31';
+var afterStart = '2003-08-01';
+var afterEnd = '2003-08-31';
+
+// var beforeStart = '2001-08-01';
+// var beforeEnd = '2001-08-31';
+// var afterStart = '2001-09-01';
+// var afterEnd = '2001-09-30';
+
+// var beforeStart = '2014-07-01';
+// var beforeEnd = '2014-07-31';
+// var afterStart = '2014-08-01';
+// var afterEnd = '2014-08-31';
+
+var geometry = nile.geometry();
+Map.addLayer(geometry, {color: 'grey'}, 'nile basin');
+
+var collection = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
+  .filterBounds(geometry)
+  .filterDate('2001-01-01', '2023-12-31')  // Specify the end date for the filter
+  .filter(ee.Filter.lt('CLOUD_COVER', 10));
+
+// Filter collections by date ranges
+var beforeCollection = collection.filterDate(beforeStart, beforeEnd);
+var afterCollection = collection.filterDate(afterStart, afterEnd);
+
+// Check if there are images available for the specified date ranges
+print('Before Collection Size:', beforeCollection.size());
+print('After Collection Size:', afterCollection.size());
+
+var before = beforeCollection.mosaic().clip(geometry);
+var after = afterCollection.mosaic().clip(geometry);
+
+Map.addLayer(before, {bands: ['SR_B4', 'SR_B3', 'SR_B2'], min: 0, max: 3000}, 'Before Floods', false);
+Map.addLayer(after, {bands: ['SR_B4', 'SR_B3', 'SR_B2'], min: 0, max: 3000}, 'After Floods', false); 
+
+// Example of a simple change detection using NDVI difference
+var ndviBefore = before.normalizedDifference(['SR_B4', 'SR_B3']);
+var ndviAfter = after.normalizedDifference(['SR_B4', 'SR_B3']);
+var difference = ndviAfter.subtract(ndviBefore);
+
+Map.addLayer(difference, {min: -1, max: 1, palette: ['blue', 'white', 'red']}, 'NDVI Difference', false);
+
+// Define a threshold for change detection
+var diffThreshold = 0.001;  // Lower threshold for debugging
+var flooded = difference.gt(diffThreshold).rename('water').selfMask();
+Map.addLayer(flooded, {min: 0, max: 1, palette: ['orange']}, 'Initial Flood Area', false);
+
+// Mask out area with permanent/semi-permanent water
+var gsw = ee.Image("JRC/GSW1_3/GlobalSurfaceWater");
+var permanentWater = gsw.select('seasonality').gte(5).clip(geometry);
+flooded = flooded.where(permanentWater, 0).selfMask();
+Map.addLayer(permanentWater.selfMask(), {min: 0, max: 1, palette: ['blue']}, 'Permanent Water');
+
+Export.image.toDrive({image:permanentWater,
+  description: 'permanentWater',
+  region: nile,
+  scale: 1000,
+})
+
+
+// Define hydrosheds
+var hydrosheds = ee.Image('WWF/HydroSHEDS/03VFDEM');
+
+// Mask out areas with more than 5 percent slope using the HydroSHEDS DEM
+var slopeThreshold = 5;
+var terrain = ee.Algorithms.Terrain(hydrosheds);
+var slope = terrain.select('slope');
+flooded = flooded.updateMask(slope.lt(slopeThreshold));
+Map.addLayer(slope.gte(slopeThreshold).selfMask(), {min: 0, max: 1, palette: ['cyan']}, 'Steep Areas', false);
+
+// Remove isolated pixels
+var connectedPixelThreshold = 8;
+var connections = flooded.connectedPixelCount(25);
+flooded = flooded.updateMask(connections.gt(connectedPixelThreshold));
+
+// Print the final flooded mask for debugging
+print('Final Flooded Mask:', flooded);
+
+// Calculate area of flooded pixels
+var pixelArea = ee.Image.pixelArea();
+var floodedArea = flooded.multiply(pixelArea).reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: geometry,
+  scale: 1000,
+  maxPixels: 1e12
+});
+print('Flooded area (m^2):', floodedArea.get('water')); 
+
+// Convert square meters to square kilometers
+var floodedAreaSqKm = ee.Number(floodedArea.get('water')).divide(1000000);
+print('Flooded area (km^2):', floodedAreaSqKm);
+
+
+Map.addLayer(connections.lte(connectedPixelThreshold).selfMask(), {min: 0, max: 1, palette: ['yellow']}, 'Disconnected Areas', false);
+
+Map.addLayer(flooded, {min: 0, max: 1, palette: ['red']}, 'Flooded Areas');
+
+Export.image.toDrive({image:flooded,
+  description: 'flooded_area2003',
+  region: nile,
+  scale: 1000,
+})
+
+
+// Calculate Affected Area
+print('Total Nile basin area (km²)', geometry.area().divide(10000).divide(100)); // Convert to km²
+
+var stats = flooded.multiply(ee.Image.pixelArea()).reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: geometry,
+  scale: 30,
+  maxPixels: 1e12,
+  tileScale: 16
+});
+// print('Flooded Area (km²)', ee.Number(stats.get('water')).divide(10000).divide(100)); // Convert to km²
+
+// If the above computation times out, you can export it
+var flooded_area = ee.Number(stats.get('water')).divide(10000).divide(100); // Convert to km²
+var feature = ee.Feature(null, {'flooded_area': flooded_area});
+var fc = ee.FeatureCollection([feature]);
+
+Export.table.toDrive({
+  collection: fc, 
+  description: 'Flooded_Area_Export',
+  folder: 'earthengine',
+  fileNamePrefix: 'flooded_area',
+  fileFormat: 'CSV'
+});
